@@ -18,16 +18,16 @@ INSERT INTO servers (name, ip_address, port, request_type, expected_status_code,
 ('Local Test Server', '127.0.0.1', 3000, 'http', 200, 'local', '#00ff00', 10, 2000, false);
 
 -- Insert some sample monitoring data for demonstration
-INSERT INTO monitoring_data (server_id, response_time, is_success, status_code, checked_at) VALUES
-(1, 15.5, true, NULL, NOW() - INTERVAL '1 minute'),
-(1, 12.3, true, NULL, NOW() - INTERVAL '2 minutes'),
-(1, 18.7, true, NULL, NOW() - INTERVAL '3 minutes'),
-(2, 245.2, true, 200, NOW() - INTERVAL '1 minute'),
-(2, 198.5, true, 200, NOW() - INTERVAL '2 minutes'),
-(2, 312.8, true, 200, NOW() - INTERVAL '3 minutes'),
-(3, 156.7, true, 200, NOW() - INTERVAL '1 minute'),
-(3, 134.2, true, 200, NOW() - INTERVAL '2 minutes'),
-(3, 189.3, true, 200, NOW() - INTERVAL '3 minutes');
+INSERT INTO monitoring_data (server_id, response_time, is_success, status_code, source_ip, checked_at) VALUES
+(1, 15.5, true, NULL, '203.0.113.1', NOW() - INTERVAL '1 minute'),
+(1, 12.3, true, NULL, '203.0.113.1', NOW() - INTERVAL '2 minutes'),
+(1, 18.7, true, NULL, '203.0.113.1', NOW() - INTERVAL '3 minutes'),
+(2, 245.2, true, 200, '203.0.113.1', NOW() - INTERVAL '1 minute'),
+(2, 198.5, true, 200, '203.0.113.1', NOW() - INTERVAL '2 minutes'),
+(2, 312.8, true, 200, '203.0.113.1', NOW() - INTERVAL '3 minutes'),
+(3, 156.7, true, 200, '203.0.113.1', NOW() - INTERVAL '1 minute'),
+(3, 134.2, true, 200, '203.0.113.1', NOW() - INTERVAL '2 minutes'),
+(3, 189.3, true, 200, '203.0.113.1', NOW() - INTERVAL '3 minutes');
 
 -- Show inserted data
 SELECT 'Servers inserted:' as info, COUNT(*) as count FROM servers;

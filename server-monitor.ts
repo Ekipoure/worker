@@ -52,6 +52,7 @@ interface ResponseData {
   error_message?: string;
   response_headers?: Record<string, string>;
   response_body?: string;
+  source_ip?: string;
   checked_at: Date;
 }
 
@@ -62,6 +63,63 @@ class ServerMonitor {
 
   constructor() {
     this.dbClient = new Client(DB_CONFIG);
+  }
+
+  // Function to get the source IP address of the current VPS
+  private async getSourceIP(): Promise<string> {
+    try {
+      // Try to get external IP using a public service
+      const { exec } = require('child_process');
+      const util = require('util');
+      const execAsync = util.promisify(exec);
+      
+      // Use multiple methods to get the external IP
+      const commands = [
+        'curl -s ifconfig.me',
+        'curl -s ipinfo.io/ip',
+        'curl -s icanhazip.com',
+        'curl -s ipecho.net/plain',
+        'wget -qO- ifconfig.me'
+      ];
+      
+      for (const command of commands) {
+        try {
+          const { stdout } = await execAsync(command);
+          const ip = stdout.trim();
+          // Validate IP address format
+          if (this.isValidIP(ip)) {
+            return ip;
+          }
+        } catch (error) {
+          // Continue to next command if this one fails
+          continue;
+        }
+      }
+      
+      // Fallback: try to get local network IP
+      const os = require('os');
+      const networkInterfaces = os.networkInterfaces();
+      
+      for (const interfaceName in networkInterfaces) {
+        const interfaces = networkInterfaces[interfaceName];
+        for (const iface of interfaces) {
+          if (iface.family === 'IPv4' && !iface.internal) {
+            return iface.address;
+          }
+        }
+      }
+      
+      return 'unknown';
+    } catch (error) {
+      console.warn('⚠️  Could not determine source IP:', error);
+      return 'unknown';
+    }
+  }
+
+  // Helper function to validate IP address format
+  private isValidIP(ip: string): boolean {
+    const ipRegex = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+    return ipRegex.test(ip);
   }
 
   async initialize(): Promise<void> {
@@ -115,6 +173,7 @@ class ServerMonitor {
           response_headers JSONB,
           response_body TEXT,
           error_message TEXT,
+          source_ip INET,
           checked_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
       `);
@@ -133,6 +192,11 @@ class ServerMonitor {
       await this.dbClient.query(`
         ALTER TABLE monitoring_data 
         ADD COLUMN IF NOT EXISTS response_body TEXT;
+      `);
+      
+      await this.dbClient.query(`
+        ALTER TABLE monitoring_data 
+        ADD COLUMN IF NOT EXISTS source_ip INET;
       `);
 
       // Fix servers table schema issues
@@ -226,16 +290,19 @@ class ServerMonitor {
     let responseData: ResponseData;
 
     try {
+      // Get source IP for this check
+      const sourceIP = await this.getSourceIP();
+
       switch (server.request_type) {
         case 'http':
         case 'https':
-          responseData = await this.checkHttpServer(server, startTime);
+          responseData = await this.checkHttpServer(server, startTime, sourceIP);
           break;
         case 'tcp':
-          responseData = await this.checkTcpServer(server, startTime);
+          responseData = await this.checkTcpServer(server, startTime, sourceIP);
           break;
         case 'ping':
-          responseData = await this.checkPingServer(server, startTime);
+          responseData = await this.checkPingServer(server, startTime, sourceIP);
           break;
         default:
           throw new Error(`Unsupported request type: ${server.request_type}`);
@@ -253,11 +320,13 @@ class ServerMonitor {
 
     } catch (error) {
       const responseTime = Date.now() - startTime;
+      const sourceIP = await this.getSourceIP();
       responseData = {
         server_id: server.id,
         response_time: responseTime,
         is_success: false,
         error_message: error instanceof Error ? error.message : 'Unknown error',
+        source_ip: sourceIP,
         checked_at: getIranDate()
       };
 
@@ -267,7 +336,7 @@ class ServerMonitor {
     }
   }
 
-  private async checkHttpServer(server: Server, startTime: number): Promise<ResponseData> {
+  private async checkHttpServer(server: Server, startTime: number, sourceIP: string): Promise<ResponseData> {
     return new Promise((resolve) => {
       let url: string;
       if (server.endpoint) {
@@ -309,6 +378,7 @@ class ServerMonitor {
             is_success: isSuccess,
             response_headers: response.headers as Record<string, string>,
             response_body: responseBody.substring(0, 1000), // Limit body size
+            source_ip: sourceIP,
             checked_at: getIranDate()
           });
         });
@@ -321,6 +391,7 @@ class ServerMonitor {
           response_time: responseTime,
           is_success: false,
           error_message: error.message,
+          source_ip: sourceIP,
           checked_at: getIranDate()
         });
       });
@@ -333,6 +404,7 @@ class ServerMonitor {
           response_time: responseTime,
           is_success: false,
           error_message: 'Request timeout',
+          source_ip: sourceIP,
           checked_at: getIranDate()
         });
       });
@@ -342,7 +414,7 @@ class ServerMonitor {
     });
   }
 
-  private async checkTcpServer(server: Server, startTime: number): Promise<ResponseData> {
+  private async checkTcpServer(server: Server, startTime: number, sourceIP: string): Promise<ResponseData> {
     return new Promise((resolve) => {
       // TCP checks require a port, so if no port is specified, return an error
       if (!server.port) {
@@ -352,6 +424,7 @@ class ServerMonitor {
           response_time: responseTime,
           is_success: false,
           error_message: 'Port is required for TCP checks',
+          source_ip: sourceIP,
           checked_at: getIranDate()
         });
         return;
@@ -375,6 +448,7 @@ class ServerMonitor {
           server_id: server.id,
           response_time: responseTime,
           is_success: true,
+          source_ip: sourceIP,
           checked_at: getIranDate()
         });
       });
@@ -387,6 +461,7 @@ class ServerMonitor {
           response_time: responseTime,
           is_success: false,
           error_message: error.message,
+          source_ip: sourceIP,
           checked_at: getIranDate()
         });
       });
@@ -399,13 +474,14 @@ class ServerMonitor {
           response_time: responseTime,
           is_success: false,
           error_message: 'Connection timeout',
+          source_ip: sourceIP,
           checked_at: getIranDate()
         });
       });
     });
   }
 
-  private async checkPingServer(server: Server, startTime: number): Promise<ResponseData> {
+  private async checkPingServer(server: Server, startTime: number, sourceIP: string): Promise<ResponseData> {
     // Use ICMP ping for proper ping functionality
     const { exec } = require('child_process');
     const util = require('util');
@@ -426,6 +502,7 @@ class ServerMonitor {
         server_id: server.id,
         response_time: responseTime,
         is_success: true,
+        source_ip: sourceIP,
         checked_at: getIranDate()
       };
     } catch (error) {
@@ -435,6 +512,7 @@ class ServerMonitor {
         response_time: responseTime,
         is_success: false,
         error_message: `Ping failed: ${error instanceof Error ? error.message : String(error)}`,
+        source_ip: sourceIP,
         checked_at: getIranDate()
       };
     }
@@ -455,8 +533,8 @@ class ServerMonitor {
       }
 
       await this.dbClient.query(`
-        INSERT INTO monitoring_data (server_id, status, response_time, status_code, response_size, is_success, error_message, response_headers, response_body, checked_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        INSERT INTO monitoring_data (server_id, status, response_time, status_code, response_size, is_success, error_message, response_headers, response_body, source_ip, checked_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       `, [
         responseData.server_id,
         status,
@@ -467,6 +545,7 @@ class ServerMonitor {
         responseData.error_message,
         responseData.response_headers ? JSON.stringify(responseData.response_headers) : null,
         responseData.response_body,
+        responseData.source_ip,
         responseData.checked_at
       ]);
     } catch (error) {
@@ -489,7 +568,8 @@ class ServerMonitor {
           ROUND(AVG(m.response_time), 2) as avg_response_time,
           ROUND(MIN(m.response_time), 2) as min_response_time,
           ROUND(MAX(m.response_time), 2) as max_response_time,
-          MAX(m.checked_at) as last_check
+          MAX(m.checked_at) as last_check,
+          (SELECT source_ip FROM monitoring_data m2 WHERE m2.server_id = s.id ORDER BY m2.checked_at DESC LIMIT 1) as last_source_ip
         FROM servers s
         LEFT JOIN monitoring_data m ON s.id = m.server_id
         WHERE s.is_active = true
@@ -498,15 +578,16 @@ class ServerMonitor {
       `);
 
       console.log('\n📊 Server Statistics:');
-      console.log('='.repeat(100));
-      console.log('Name'.padEnd(20) + 'Address'.padEnd(20) + 'Type'.padEnd(8) + 'Group'.padEnd(12) + 'Checks'.padEnd(8) + 'Success'.padEnd(8) + 'Avg Time'.padEnd(10) + 'Last Check');
-      console.log('-'.repeat(100));
+      console.log('='.repeat(120));
+      console.log('Name'.padEnd(20) + 'Address'.padEnd(20) + 'Type'.padEnd(8) + 'Group'.padEnd(12) + 'Checks'.padEnd(8) + 'Success'.padEnd(8) + 'Avg Time'.padEnd(10) + 'Source IP'.padEnd(15) + 'Last Check');
+      console.log('-'.repeat(120));
 
       for (const row of result.rows) {
         const successRate = row.total_checks > 0 ? ((row.successful_checks / row.total_checks) * 100).toFixed(1) : '0.0';
         const lastCheck = row.last_check ? formatIranDate(new Date(row.last_check)) : 'Never';
         
         const address = row.port ? `${row.ip_address}:${row.port}` : row.ip_address;
+        const sourceIP = row.last_source_ip || 'Unknown';
         console.log(
           row.name.padEnd(20) +
           address.padEnd(20) +
@@ -515,10 +596,11 @@ class ServerMonitor {
           row.total_checks.toString().padEnd(8) +
           `${successRate}%`.padEnd(8) +
           `${row.avg_response_time || 0}ms`.padEnd(10) +
+          sourceIP.padEnd(15) +
           lastCheck
         );
       }
-      console.log('='.repeat(100));
+      console.log('='.repeat(120));
     } catch (error) {
       console.error('❌ Failed to get server stats:', error instanceof Error ? error.message : String(error));
     }
