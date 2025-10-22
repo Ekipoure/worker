@@ -1,0 +1,34 @@
+{
+  "name": "server-monitor",
+  "version": "1.0.0",
+  "description": "A comprehensive server monitoring script with PostgreSQL database",
+  "main": "server-monitor.ts",
+  "type": "commonjs",
+  "scripts": {
+    "start": "ts-node server-monitor.ts",
+    "dev": "ts-node --watch server-monitor.ts",
+    "build": "tsc server-monitor.ts --outDir dist --target es2020 --module commonjs --esModuleInterop --allowSyntheticDefaultImports",
+    "setup": "node setup-servers.js",
+    "install-deps": "npm install"
+  },
+  "dependencies": {
+    "@types/moment-timezone": "^0.5.13",
+    "@types/pg": "^8.10.9",
+    "moment-timezone": "^0.6.0",
+    "pg": "^8.11.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  },
+  "keywords": [
+    "server-monitoring",
+    "postgresql",
+    "typescript",
+    "health-check",
+    "network-monitoring"
+  ],
+  "author": "Server Monitor",
+  "license": "MIT"
+}
