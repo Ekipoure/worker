@@ -520,24 +520,11 @@ class ServerMonitor {
 
   private async storeResponse(responseData: ResponseData): Promise<void> {
     try {
-      // Determine status based on success and error conditions
-      let status = 'up';
-      if (!responseData.is_success) {
-        if (responseData.error_message?.includes('timeout')) {
-          status = 'timeout';
-        } else if (responseData.error_message) {
-          status = 'error';
-        } else {
-          status = 'down';
-        }
-      }
-
       await this.dbClient.query(`
-        INSERT INTO monitoring_data (server_id, status, response_time, status_code, response_size, is_success, error_message, response_headers, response_body, source_ip, checked_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        INSERT INTO monitoring_data (server_id, response_time, status_code, response_size, is_success, error_message, response_headers, response_body, source_ip, checked_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       `, [
         responseData.server_id,
-        status,
         responseData.response_time,
         responseData.status_code,
         responseData.response_size,
