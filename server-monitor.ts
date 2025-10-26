@@ -166,6 +166,7 @@ class ServerMonitor {
         CREATE TABLE IF NOT EXISTS monitoring_data (
           id SERIAL PRIMARY KEY,
           server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+          status VARCHAR(20) NOT NULL DEFAULT 'up',
           response_time DECIMAL(10,2) NOT NULL,
           is_success BOOLEAN NOT NULL,
           status_code INTEGER,
@@ -179,6 +180,11 @@ class ServerMonitor {
       `);
 
       // Add missing columns to existing table if they don't exist
+      await this.dbClient.query(`
+        ALTER TABLE monitoring_data 
+        ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'up';
+      `);
+      
       await this.dbClient.query(`
         ALTER TABLE monitoring_data 
         ADD COLUMN IF NOT EXISTS response_size INTEGER;
@@ -520,11 +526,24 @@ class ServerMonitor {
 
   private async storeResponse(responseData: ResponseData): Promise<void> {
     try {
+      // Determine status based on success and error conditions
+      let status = 'up';
+      if (!responseData.is_success) {
+        if (responseData.error_message?.includes('timeout')) {
+          status = 'timeout';
+        } else if (responseData.error_message) {
+          status = 'error';
+        } else {
+          status = 'down';
+        }
+      }
+
       await this.dbClient.query(`
-        INSERT INTO monitoring_data (server_id, response_time, status_code, response_size, is_success, error_message, response_headers, response_body, source_ip, checked_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        INSERT INTO monitoring_data (server_id, status, response_time, status_code, response_size, is_success, error_message, response_headers, response_body, source_ip, checked_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       `, [
         responseData.server_id,
+        status,
         responseData.response_time,
         responseData.status_code,
         responseData.response_size,
