@@ -15,9 +15,20 @@ const DB_CONFIG = {
 // Timezone configuration
 const IRAN_TIMEZONE = 'Asia/Tehran';
 
-// Helper function to get Iran timezone aware date
+// Helper function to get Iran timezone aware date for PostgreSQL
+// Returns a Date object that represents the current time in Iran timezone
+// PostgreSQL will convert this correctly when session timezone is set to Asia/Tehran
 function getIranDate(): Date {
-  return moment().tz(IRAN_TIMEZONE).toDate();
+  // Get current time in Iran timezone and create a Date object
+  // Since we set session timezone to Asia/Tehran, PostgreSQL will handle conversion
+  const iranMoment = moment().tz(IRAN_TIMEZONE);
+  // Return as Date - PostgreSQL will interpret this correctly with session timezone
+  return iranMoment.toDate();
+}
+
+// Helper function to format date string in Iran timezone for explicit SQL insertion
+function getIranDateString(): string {
+  return moment().tz(IRAN_TIMEZONE).format('YYYY-MM-DD HH:mm:ss');
 }
 
 // Helper function to format date for display in Iran timezone
@@ -127,8 +138,24 @@ class ServerMonitor {
     try {
       await this.dbClient.connect();
       
-      // Set timezone to Iran
+      // Set timezone to Iran immediately after connection
+      // IMPORTANT: This sets timezone at the database SESSION level, not system level
+      // This means it works regardless of:
+      // - Where the server is located (US, Europe, Asia, etc.)
+      // - What timezone the operating system is using
+      // - What timezone the PostgreSQL server is configured with
+      // Each connection gets its own session with Iran timezone
       await this.dbClient.query(`SET timezone = '${IRAN_TIMEZONE}'`);
+      
+      // Verify timezone is set correctly
+      // Use current_setting() function which is more reliable than SHOW
+      const tzResult = await this.dbClient.query(`SELECT current_setting('timezone') as timezone`);
+      const timezoneValue = tzResult.rows[0]?.timezone || 'unknown';
+      console.log(`📅 Database timezone set to: ${timezoneValue}`);
+      
+      // Optional: Show current time in Iran timezone for verification
+      const currentTimeResult = await this.dbClient.query(`SELECT NOW() as current_time`);
+      console.log(`🕐 Current database time: ${formatIranDate(new Date(currentTimeResult.rows[0].current_time))} (Iran/Tehran)`);
       
       // Create tables if they don't exist
       await this.createTables();
@@ -546,9 +573,11 @@ class ServerMonitor {
         }
       }
 
+      // Insert monitoring data with checked_at in Iran timezone
+      // Since session timezone is set to Asia/Tehran, PostgreSQL will correctly store and display timestamps
       await this.dbClient.query(`
         INSERT INTO monitoring_data (server_id, status, response_time, status_code, response_size, is_success, error_message, response_headers, response_body, source_ip, checked_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::timestamp with time zone)
       `, [
         responseData.server_id,
         status,

@@ -16,6 +16,16 @@ async function setupServers() {
     console.log('🔌 Connecting to database...');
     await client.connect();
     
+    // Set timezone to Iran/Tehran for this session
+    // This ensures all timestamp operations (including NOW() defaults) use Iran timezone
+    await client.query(`SET timezone = 'Asia/Tehran'`);
+    
+    // Verify timezone is set correctly
+    // Use current_setting() function which is more reliable than SHOW
+    const tzResult = await client.query(`SELECT current_setting('timezone') as timezone`);
+    const timezoneValue = tzResult.rows[0]?.timezone || 'unknown';
+    console.log(`📅 Database timezone set to: ${timezoneValue}`);
+    
     console.log('📖 Reading SQL file...');
     const sqlFile = path.join(__dirname, 'setup-sample-servers.sql');
     const sqlContent = fs.readFileSync(sqlFile, 'utf8');
