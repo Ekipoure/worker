@@ -249,13 +249,6 @@ class ServerMonitor {
     // Load active servers and start monitoring
     await this.loadAndStartMonitoring();
 
-    // Set up periodic reload of servers (in case of updates)
-    setInterval(async () => {
-      if (this.isRunning) {
-        await this.loadAndStartMonitoring();
-      }
-    }, 60000); // Reload every minute
-
     console.log('✅ Server monitoring started. Press Ctrl+C to stop.');
   }
 
