@@ -60,6 +60,7 @@ class ServerMonitor {
   private dbClient: Client;
   private activeChecks: Map<number, NodeJS.Timeout> = new Map();
   private isRunning: boolean = false;
+  private checkingServers: Set<number> = new Set(); // جلوگیری از چک همزمان یک سرور
 
   constructor() {
     this.dbClient = new Client(DB_CONFIG);
@@ -274,8 +275,11 @@ class ServerMonitor {
 
         this.activeChecks.set(server.id, interval);
 
-        // Run initial check immediately
-        await this.checkServer(server);
+        // Run initial check immediately (async without await to avoid blocking)
+        // This ensures intervals are set up quickly
+        this.checkServer(server).catch(err => {
+          console.error(`❌ Error in initial check for ${server.name}:`, err);
+        });
       }
 
       console.log(`📊 Monitoring ${servers.length} active servers`);
@@ -285,6 +289,14 @@ class ServerMonitor {
   }
 
   private async checkServer(server: Server): Promise<void> {
+    // جلوگیری از چک همزمان: اگر این سرور در حال چک شدن است، skip کن
+    if (this.checkingServers.has(server.id)) {
+      return;
+    }
+
+    // علامت بزن که این سرور در حال چک شدن است
+    this.checkingServers.add(server.id);
+
     const startTime = Date.now();
     let responseData: ResponseData;
 
@@ -332,6 +344,9 @@ class ServerMonitor {
       await this.storeResponse(responseData);
       const address = server.port ? `${server.ip_address}:${server.port}` : server.ip_address;
       console.log(`❌ ${server.name} (${address}) - Error: ${responseData.error_message}`);
+    } finally {
+      // در هر حالتی (موفق یا ناموفق) flag را پاک کن
+      this.checkingServers.delete(server.id);
     }
   }
 
@@ -613,6 +628,9 @@ class ServerMonitor {
       clearInterval(interval);
     }
     this.activeChecks.clear();
+    
+    // Clear checking flags
+    this.checkingServers.clear();
 
     console.log('🛑 Server monitoring stopped');
   }
