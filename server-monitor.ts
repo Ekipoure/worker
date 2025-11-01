@@ -486,7 +486,8 @@ class ServerMonitor {
 
         response.on('end', () => {
           const responseTime = Date.now() - startTime;
-          const isSuccess = response.statusCode === server.expected_status_code;
+          // اگر response time بیشتر از timeout باشد، timeout تشخیص داده می‌شود
+          const isSuccess = responseTime <= server.timeout;
 
           resolve({
             server_id: server.id,
@@ -496,6 +497,7 @@ class ServerMonitor {
             is_success: isSuccess,
             response_headers: response.headers as Record<string, string>,
             response_body: responseBody.substring(0, 1000), // Limit body size
+            error_message: !isSuccess ? `Response time ${responseTime}ms exceeds timeout ${server.timeout}ms` : undefined,
             source_ip: sourceIP,
             checked_at: getIranDate()
           });
@@ -504,11 +506,14 @@ class ServerMonitor {
 
       request.on('error', (error) => {
         const responseTime = Date.now() - startTime;
+        // اگر response time برگردانده شده، سرور آنلاین است (حتی با خطا)
+        // فقط اگر timeout کامل شود (response_time >= timeout)، آفلاین است
+        const isSuccess = responseTime < server.timeout;
         resolve({
           server_id: server.id,
           response_time: responseTime,
-          is_success: false,
-          error_message: error.message,
+          is_success: isSuccess,
+          error_message: isSuccess ? error.message : 'No response received',
           source_ip: sourceIP,
           checked_at: getIranDate()
         });
@@ -517,11 +522,12 @@ class ServerMonitor {
       request.on('timeout', () => {
         const responseTime = Date.now() - startTime;
         request.destroy();
+        // timeout کامل = هیچ response time برنگردانده شده = آفلاین
         resolve({
           server_id: server.id,
           response_time: responseTime,
           is_success: false,
-          error_message: 'Request timeout',
+          error_message: 'Request timeout - No response received',
           source_ip: sourceIP,
           checked_at: getIranDate()
         });
@@ -562,10 +568,13 @@ class ServerMonitor {
       socket.connect(server.port, server.ip_address, () => {
         const responseTime = Date.now() - startTime;
         cleanup();
+        // اگر response time بیشتر از timeout باشد، timeout تشخیص داده می‌شود
+        const isSuccess = responseTime <= server.timeout;
         resolve({
           server_id: server.id,
           response_time: responseTime,
-          is_success: true,
+          is_success: isSuccess,
+          error_message: !isSuccess ? `Connection time ${responseTime}ms exceeds timeout ${server.timeout}ms` : undefined,
           source_ip: sourceIP,
           checked_at: getIranDate()
         });
@@ -574,11 +583,14 @@ class ServerMonitor {
       socket.on('error', (error) => {
         const responseTime = Date.now() - startTime;
         cleanup();
+        // اگر خطا سریع برگردد (response_time < timeout)، سرور آنلاین است
+        // فقط اگر timeout کامل شود (response_time >= timeout)، آفلاین است
+        const isSuccess = responseTime < server.timeout;
         resolve({
           server_id: server.id,
           response_time: responseTime,
-          is_success: false,
-          error_message: error.message,
+          is_success: isSuccess,
+          error_message: isSuccess ? error.message : 'Connection timeout - No response received',
           source_ip: sourceIP,
           checked_at: getIranDate()
         });
@@ -587,11 +599,12 @@ class ServerMonitor {
       socket.on('timeout', () => {
         const responseTime = Date.now() - startTime;
         cleanup();
+        // timeout کامل = هیچ response time برنگردانده شده = آفلاین
         resolve({
           server_id: server.id,
           response_time: responseTime,
           is_success: false,
-          error_message: 'Connection timeout',
+          error_message: 'Connection timeout - No response received',
           source_ip: sourceIP,
           checked_at: getIranDate()
         });
@@ -612,24 +625,32 @@ class ServerMonitor {
       
       const { stdout, stderr } = await execAsync(command);
       
-      // Parse ping output to get response time
-      const timeMatch = stdout.match(/time=(\d+\.?\d*)/);
-      const responseTime = timeMatch ? parseFloat(timeMatch[1]) : (Date.now() - startTime);
+      // استفاده از Date.now() برای محاسبه response time (همیشه در milliseconds)
+      const responseTime = Date.now() - startTime;
+      
+      // اگر response time بیشتر از timeout باشد، timeout تشخیص داده می‌شود
+      const isSuccess = responseTime <= server.timeout;
       
       return {
         server_id: server.id,
         response_time: responseTime,
-        is_success: true,
+        is_success: isSuccess,
+        error_message: !isSuccess ? `Ping time ${responseTime}ms exceeds timeout ${server.timeout}ms` : undefined,
         source_ip: sourceIP,
         checked_at: getIranDate()
       };
     } catch (error) {
       const responseTime = Date.now() - startTime;
+      // اگر ping timeout کامل شود (response_time >= timeout)، آفلاین است
+      // در غیر این صورت، اگر خطا سریع برگردد، هنوز آنلاین است
+      const isSuccess = responseTime < server.timeout;
       return {
         server_id: server.id,
         response_time: responseTime,
-        is_success: false,
-        error_message: `Ping failed: ${error instanceof Error ? error.message : String(error)}`,
+        is_success: isSuccess,
+        error_message: isSuccess 
+          ? `Ping error: ${error instanceof Error ? error.message : String(error)}`
+          : 'Ping timeout - No response received',
         source_ip: sourceIP,
         checked_at: getIranDate()
       };
@@ -639,14 +660,19 @@ class ServerMonitor {
   private async storeResponse(responseData: ResponseData): Promise<void> {
     try {
       // Determine status based on success and error conditions
+      // سرور فقط زمانی آفلاین است که هیچ response time برنگردانده باشد
+      // یا response time بیشتر از timeout باشد
       let status = 'up';
       if (!responseData.is_success) {
-        if (responseData.error_message?.includes('timeout')) {
-          status = 'timeout';
-        } else if (responseData.error_message) {
-          status = 'error';
+        // چک کنم که آیا response time بیشتر از timeout است
+        if (responseData.error_message?.includes('exceeds timeout')) {
+          status = 'timeout'; // Timeout - response time از حد مجاز بیشتر است
+        } else if (responseData.error_message?.includes('No response received')) {
+          status = 'down'; // آفلاین - هیچ پاسخی دریافت نشده
+        } else if (responseData.error_message?.includes('timeout')) {
+          status = 'timeout'; // Timeout - timeout کامل
         } else {
-          status = 'down';
+          status = 'down'; // آفلاین - هیچ پاسخی دریافت نشده
         }
       }
 
