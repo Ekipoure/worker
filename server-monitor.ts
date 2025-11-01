@@ -72,6 +72,8 @@ class ServerMonitor {
   private activeChecks: Map<number, NodeJS.Timeout> = new Map();
   private isRunning: boolean = false;
   private checkingServers: Set<number> = new Set(); // جلوگیری از چک همزمان یک سرور
+  private refreshInterval?: NodeJS.Timeout; // برای refresh دوره‌ای سرورها
+  private monitoredServerIds: Set<number> = new Set(); // لیست سرورهایی که در حال مانیتور هستند
 
   constructor() {
     this.dbClient = new Client(DB_CONFIG);
@@ -277,7 +279,15 @@ class ServerMonitor {
     // Load active servers and start monitoring
     await this.loadAndStartMonitoring();
 
+    // Start periodic refresh to detect new servers (every 30 seconds)
+    this.refreshInterval = setInterval(async () => {
+      if (this.isRunning) {
+        await this.refreshServers();
+      }
+    }, 30000); // هر 30 ثانیه یک بار بررسی می‌کند
+
     console.log('✅ Server monitoring started. Press Ctrl+C to stop.');
+    console.log('🔄 Auto-refresh enabled: New servers will be detected every 30 seconds.');
   }
 
   private async loadAndStartMonitoring(): Promise<void> {
@@ -289,29 +299,96 @@ class ServerMonitor {
       const servers: Server[] = result.rows;
 
       for (const server of servers) {
-        // Clear existing interval for this server
-        const existingInterval = this.activeChecks.get(server.id);
-        if (existingInterval) {
-          clearInterval(existingInterval);
-        }
-
-        // Start new monitoring for this server
-        const interval = setInterval(async () => {
-          await this.checkServer(server);
-        }, server.check_interval * 1000);
-
-        this.activeChecks.set(server.id, interval);
-
-        // Run initial check immediately (async without await to avoid blocking)
-        // This ensures intervals are set up quickly
-        this.checkServer(server).catch(err => {
-          console.error(`❌ Error in initial check for ${server.name}:`, err);
-        });
+        await this.startMonitoringServer(server);
       }
 
       console.log(`📊 Monitoring ${servers.length} active servers`);
     } catch (error) {
       console.error('❌ Error loading servers:', error);
+    }
+  }
+
+  private async startMonitoringServer(server: Server): Promise<void> {
+    // اگر این سرور قبلاً در حال مانیتور است، skip کن
+    if (this.monitoredServerIds.has(server.id)) {
+      return;
+    }
+
+    // Clear existing interval for this server (اگر وجود داشت)
+    const existingInterval = this.activeChecks.get(server.id);
+    if (existingInterval) {
+      clearInterval(existingInterval);
+    }
+
+    // Start new monitoring for this server
+    const interval = setInterval(async () => {
+      // برای هر interval، سرور را دوباره از دیتابیس بخوان تا تغییرات اعمال شود
+      try {
+        const result = await this.dbClient.query(`
+          SELECT * FROM servers WHERE id = $1 AND is_active = true
+        `, [server.id]);
+        
+        if (result.rows.length === 0) {
+          // سرور دیگر active نیست، stop کن
+          this.stopMonitoringServer(server.id);
+          return;
+        }
+        
+        const updatedServer: Server = result.rows[0];
+        await this.checkServer(updatedServer);
+      } catch (error) {
+        console.error(`❌ Error checking server ${server.name}:`, error);
+      }
+    }, server.check_interval * 1000);
+
+    this.activeChecks.set(server.id, interval);
+    this.monitoredServerIds.add(server.id);
+
+    // Run initial check immediately (async without await to avoid blocking)
+    this.checkServer(server).catch(err => {
+      console.error(`❌ Error in initial check for ${server.name}:`, err);
+    });
+  }
+
+  private stopMonitoringServer(serverId: number): void {
+    const interval = this.activeChecks.get(serverId);
+    if (interval) {
+      clearInterval(interval);
+      this.activeChecks.delete(serverId);
+      this.monitoredServerIds.delete(serverId);
+    }
+  }
+
+  private async refreshServers(): Promise<void> {
+    try {
+      const result = await this.dbClient.query(`
+        SELECT * FROM servers WHERE is_active = true ORDER BY id
+      `);
+
+      const currentServerIds = new Set<number>();
+      const servers: Server[] = result.rows;
+
+      // سرورهای جدید را اضافه کن
+      for (const server of servers) {
+        currentServerIds.add(server.id);
+        
+        if (!this.monitoredServerIds.has(server.id)) {
+          // سرور جدید پیدا شد
+          console.log(`🆕 New server detected: ${server.name} (ID: ${server.id}). Starting monitoring...`);
+          await this.startMonitoringServer(server);
+        }
+      }
+
+      // سرورهایی که دیگر active نیستند را stop کن
+      for (const monitoredId of this.monitoredServerIds) {
+        if (!currentServerIds.has(monitoredId)) {
+          console.log(`⏹️  Server (ID: ${monitoredId}) is no longer active. Stopping monitoring...`);
+          this.stopMonitoringServer(monitoredId);
+        }
+      }
+
+    } catch (error) {
+      console.error('❌ Error refreshing servers:', error);
     }
   }
 
@@ -652,6 +729,12 @@ class ServerMonitor {
   async stopMonitoring(): Promise<void> {
     this.isRunning = false;
     
+    // Clear refresh interval
+    if (this.refreshInterval) {
+      clearInterval(this.refreshInterval);
+      this.refreshInterval = undefined;
+    }
+    
     // Clear all intervals
     for (const interval of this.activeChecks.values()) {
       clearInterval(interval);
@@ -660,6 +743,9 @@ class ServerMonitor {
     
     // Clear checking flags
     this.checkingServers.clear();
+    
+    // Clear monitored servers list
+    this.monitoredServerIds.clear();
 
     console.log('🛑 Server monitoring stopped');
   }
