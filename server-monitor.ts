@@ -625,8 +625,58 @@ class ServerMonitor {
       
       const { stdout, stderr } = await execAsync(command);
       
-      // استفاده از Date.now() برای محاسبه response time (همیشه در milliseconds)
-      const responseTime = Date.now() - startTime;
+      // Parse the actual ping time from the output
+      // Try multiple methods to extract the most accurate ping time
+      const fallbackTime = Date.now() - startTime; // Fallback to total execution time
+      let responseTime = fallbackTime;
+      const lines = stdout.split('\n');
+      
+      // Method 1: Try to extract from rtt statistics line (most accurate)
+      // Format: "rtt min/avg/max/mdev = 60.547/60.547/60.547/0.000 ms"
+      const rttLine = lines.find((line: string) => line.includes('rtt') && line.includes('min/avg/max'));
+      if (rttLine) {
+        const rttMatch = rttLine.match(/min\/avg\/max\/mdev\s*=\s*[\d.]+\/([\d.]+)\/[\d.]+\//i);
+        if (rttMatch && rttMatch[1]) {
+          const extractedTime = parseFloat(rttMatch[1]);
+          if (!isNaN(extractedTime) && extractedTime > 0 && extractedTime < 100000) {
+            responseTime = extractedTime;
+          }
+        }
+      }
+      
+      // Method 2: Extract from the response line (contains "bytes from")
+      // Format: "64 bytes from 99.84.152.26: icmp_seq=1 ttl=52 time=82.5 ms"
+      if (responseTime === fallbackTime) {
+        const responseLine = lines.find((line: string) => line.includes('bytes from') && line.includes('time'));
+        if (responseLine) {
+          // Try different patterns: time=82.5 ms, time=82 ms, time:82.5ms
+          const timeMatch = responseLine.match(/time[=:](\d+\.?\d*)\s*ms/i) ||
+                           responseLine.match(/time[=:](\d+\.?\d*)ms/i);
+          if (timeMatch && timeMatch[1]) {
+            const extractedTime = parseFloat(timeMatch[1]);
+            if (!isNaN(extractedTime) && extractedTime > 0 && extractedTime < 100000) {
+              responseTime = extractedTime;
+            }
+          }
+        }
+      }
+      
+      // Method 3: Fallback - try to match time= pattern anywhere (but prefer earlier matches)
+      if (responseTime === fallbackTime) {
+        const timeMatch = stdout.match(/time[=:](\d+\.?\d*)\s*ms/i) ||
+                         stdout.match(/time[=:](\d+\.?\d*)ms/i);
+        if (timeMatch && timeMatch[1]) {
+          const extractedTime = parseFloat(timeMatch[1]);
+          if (!isNaN(extractedTime) && extractedTime > 0 && extractedTime < 100000) {
+            responseTime = extractedTime;
+          }
+        }
+      }
+      
+      // Log warning if we couldn't extract ping time (for debugging)
+      if (responseTime === fallbackTime && fallbackTime > 1000) {
+        console.warn(`⚠️  Could not parse ping time from output for ${server.ip_address}. Using total execution time: ${fallbackTime}ms`);
+      }
       
       // اگر response time بیشتر از timeout باشد، timeout تشخیص داده می‌شود
       const isSuccess = responseTime <= server.timeout;
