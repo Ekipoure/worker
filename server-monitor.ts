@@ -833,6 +833,9 @@ class ServerMonitor {
 
   async getServerStats(): Promise<void> {
     try {
+      // Ensure timezone is set correctly before querying
+      await this.ensureTimezone();
+      
       const result = await this.dbClient.query(`
         SELECT 
           s.name,
@@ -846,7 +849,7 @@ class ServerMonitor {
           ROUND(AVG(m.response_time), 2) as avg_response_time,
           ROUND(MIN(m.response_time), 2) as min_response_time,
           ROUND(MAX(m.response_time), 2) as max_response_time,
-          MAX(m.checked_at) as last_check,
+          TO_CHAR(MAX(m.checked_at) AT TIME ZONE '${IRAN_TIMEZONE}', 'YYYY-MM-DD HH24:MI:SS') as last_check,
           (SELECT source_ip FROM monitoring_data m2 WHERE m2.server_id = s.id ORDER BY m2.checked_at DESC LIMIT 1) as last_source_ip
         FROM servers s
         LEFT JOIN monitoring_data m ON s.id = m.server_id
@@ -862,7 +865,7 @@ class ServerMonitor {
 
       for (const row of result.rows) {
         const successRate = row.total_checks > 0 ? ((row.successful_checks / row.total_checks) * 100).toFixed(1) : '0.0';
-        const lastCheck = row.last_check ? formatIranDate(new Date(row.last_check)) : 'Never';
+        const lastCheck = row.last_check || 'Never';
         
         const address = row.port ? `${row.ip_address}:${row.port}` : row.ip_address;
         const sourceIP = row.last_source_ip || 'Unknown';
