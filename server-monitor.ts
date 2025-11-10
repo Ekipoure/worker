@@ -144,21 +144,22 @@ class ServerMonitor {
   }
 
   // Helper method to ensure timezone is set correctly (can be called periodically)
+  // This method is optimized to only set timezone if it's not already set correctly
   private async ensureTimezone(): Promise<void> {
     try {
-      // Set timezone to Iran at the session level
-      await this.dbClient.query(`SET timezone = '${IRAN_TIMEZONE}'`);
-      
-      // Verify timezone is set correctly
+      // First check if timezone is already set correctly (to avoid unnecessary queries)
       const tzResult = await this.dbClient.query(`SELECT current_setting('timezone') as timezone`);
       const timezoneValue = tzResult.rows[0]?.timezone || 'unknown';
       
+      // Only set timezone if it's not already set to Iran timezone
       if (timezoneValue !== IRAN_TIMEZONE) {
-        console.warn(`⚠️  Warning: Database timezone is ${timezoneValue}, expected ${IRAN_TIMEZONE}. Retrying...`);
+        // Set timezone to Iran at the session level
         await this.dbClient.query(`SET timezone = '${IRAN_TIMEZONE}'`);
-        // Verify again
+        
+        // Verify timezone is set correctly
         const tzResult2 = await this.dbClient.query(`SELECT current_setting('timezone') as timezone`);
         const timezoneValue2 = tzResult2.rows[0]?.timezone || 'unknown';
+        
         if (timezoneValue2 !== IRAN_TIMEZONE) {
           console.error(`❌ Failed to set database timezone to ${IRAN_TIMEZONE}. Current: ${timezoneValue2}`);
         }
@@ -778,6 +779,10 @@ class ServerMonitor {
 
   private async storeResponse(responseData: ResponseData): Promise<void> {
     try {
+      // Ensure timezone is set correctly before inserting data
+      // This is important because connection pooling or other factors might reset the timezone
+      await this.ensureTimezone();
+      
       // Determine status based on success and error conditions
       // سرور فقط زمانی آفلاین است که هیچ response time برنگردانده باشد
       // یا response time بیشتر از timeout باشد
@@ -796,12 +801,11 @@ class ServerMonitor {
       }
 
       // Insert monitoring data with checked_at in Iran timezone
-      // Use explicit timezone conversion to ensure correct storage regardless of server timezone
-      // JavaScript Date objects are stored as UTC internally
-      // We need to interpret the Date as UTC first, then convert to Iran timezone
-      // This ensures correct conversion regardless of the server's system timezone
-      const checkedAtMoment = moment.utc(responseData.checked_at).tz(IRAN_TIMEZONE);
-      const iranTimeString = checkedAtMoment.format('YYYY-MM-DD HH:mm:ss');
+      // IMPORTANT: Always use current time in Iran timezone directly, not from responseData.checked_at
+      // This ensures correct timezone handling regardless of server's system timezone
+      // The responseData.checked_at might have been created with a Date object that was converted to UTC
+      // So we ignore it and use the current time in Iran timezone directly
+      const iranTimeString = moment().tz(IRAN_TIMEZONE).format('YYYY-MM-DD HH:mm:ss');
       
       // Use PostgreSQL's explicit timezone conversion to ensure correct storage
       // This interprets the timestamp string as being in Iran timezone, then converts to timestamptz
