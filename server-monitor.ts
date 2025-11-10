@@ -17,17 +17,24 @@ const IRAN_TIMEZONE = 'Asia/Tehran';
 
 // Helper function to get Iran timezone aware date for PostgreSQL
 // Returns a Date object that represents the current time in Iran timezone
-// PostgreSQL will convert this correctly when session timezone is set to Asia/Tehran
+// Note: This is kept for backward compatibility but should use getIranTimestampString() for database operations
 function getIranDate(): Date {
-  // Get current time in Iran timezone and create a Date object
-  // Since we set session timezone to Asia/Tehran, PostgreSQL will handle conversion
+  // Get current time in Iran timezone
   const iranMoment = moment().tz(IRAN_TIMEZONE);
-  // Return as Date - PostgreSQL will interpret this correctly with session timezone
+  // Return as Date - but be aware this is converted to UTC internally
   return iranMoment.toDate();
 }
 
 // Helper function to format date string in Iran timezone for explicit SQL insertion
 function getIranDateString(): string {
+  return moment().tz(IRAN_TIMEZONE).format('YYYY-MM-DD HH:mm:ss');
+}
+
+// Helper function to get Iran timezone timestamp string with explicit timezone for PostgreSQL
+// This is the recommended way to insert timestamps to ensure correct timezone handling
+function getIranTimestampString(): string {
+  // Format: 'YYYY-MM-DD HH:mm:ss' with timezone offset
+  // PostgreSQL will correctly interpret this as Iran timezone
   return moment().tz(IRAN_TIMEZONE).format('YYYY-MM-DD HH:mm:ss');
 }
 
@@ -136,6 +143,31 @@ class ServerMonitor {
     return ipRegex.test(ip);
   }
 
+  // Helper method to ensure timezone is set correctly (can be called periodically)
+  private async ensureTimezone(): Promise<void> {
+    try {
+      // Set timezone to Iran at the session level
+      await this.dbClient.query(`SET timezone = '${IRAN_TIMEZONE}'`);
+      
+      // Verify timezone is set correctly
+      const tzResult = await this.dbClient.query(`SELECT current_setting('timezone') as timezone`);
+      const timezoneValue = tzResult.rows[0]?.timezone || 'unknown';
+      
+      if (timezoneValue !== IRAN_TIMEZONE) {
+        console.warn(`⚠️  Warning: Database timezone is ${timezoneValue}, expected ${IRAN_TIMEZONE}. Retrying...`);
+        await this.dbClient.query(`SET timezone = '${IRAN_TIMEZONE}'`);
+        // Verify again
+        const tzResult2 = await this.dbClient.query(`SELECT current_setting('timezone') as timezone`);
+        const timezoneValue2 = tzResult2.rows[0]?.timezone || 'unknown';
+        if (timezoneValue2 !== IRAN_TIMEZONE) {
+          console.error(`❌ Failed to set database timezone to ${IRAN_TIMEZONE}. Current: ${timezoneValue2}`);
+        }
+      }
+    } catch (error) {
+      console.error('❌ Error ensuring timezone:', error);
+    }
+  }
+
   async initialize(): Promise<void> {
     try {
       await this.dbClient.connect();
@@ -147,17 +179,15 @@ class ServerMonitor {
       // - What timezone the operating system is using
       // - What timezone the PostgreSQL server is configured with
       // Each connection gets its own session with Iran timezone
-      await this.dbClient.query(`SET timezone = '${IRAN_TIMEZONE}'`);
+      await this.ensureTimezone();
       
-      // Verify timezone is set correctly
-      // Use current_setting() function which is more reliable than SHOW
-      const tzResult = await this.dbClient.query(`SELECT current_setting('timezone') as timezone`);
-      const timezoneValue = tzResult.rows[0]?.timezone || 'unknown';
-      console.log(`📅 Database timezone set to: ${timezoneValue}`);
-      
-      // Optional: Show current time in Iran timezone for verification
-      const currentTimeResult = await this.dbClient.query(`SELECT NOW() as current_time`);
-      console.log(`🕐 Current database time: ${formatIranDate(new Date(currentTimeResult.rows[0].current_time))} (Iran/Tehran)`);
+      // Show current time in Iran timezone for verification
+      const currentTimeResult = await this.dbClient.query(`SELECT NOW() AT TIME ZONE '${IRAN_TIMEZONE}' as current_time`);
+      const dbTime = currentTimeResult.rows[0].current_time;
+      const localIranTime = moment().tz(IRAN_TIMEZONE).format('YYYY-MM-DD HH:mm:ss');
+      console.log(`📅 Database timezone: ${IRAN_TIMEZONE}`);
+      console.log(`🕐 Database time (Iran): ${dbTime}`);
+      console.log(`🕐 Local time (Iran): ${localIranTime}`);
       
       // Create tables if they don't exist
       await this.createTables();
@@ -766,10 +796,19 @@ class ServerMonitor {
       }
 
       // Insert monitoring data with checked_at in Iran timezone
-      // Since session timezone is set to Asia/Tehran, PostgreSQL will correctly store and display timestamps
+      // Use explicit timezone conversion to ensure correct storage regardless of server timezone
+      // JavaScript Date objects are stored as UTC internally
+      // We need to interpret the Date as UTC first, then convert to Iran timezone
+      // This ensures correct conversion regardless of the server's system timezone
+      const checkedAtMoment = moment.utc(responseData.checked_at).tz(IRAN_TIMEZONE);
+      const iranTimeString = checkedAtMoment.format('YYYY-MM-DD HH:mm:ss');
+      
+      // Use PostgreSQL's explicit timezone conversion to ensure correct storage
+      // This interprets the timestamp string as being in Iran timezone, then converts to timestamptz
+      // This approach works regardless of the server's system timezone or PostgreSQL server timezone
       await this.dbClient.query(`
         INSERT INTO monitoring_data (server_id, status, response_time, status_code, response_size, is_success, error_message, response_headers, response_body, source_ip, checked_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::timestamp with time zone)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, ($11::timestamp AT TIME ZONE '${IRAN_TIMEZONE}')::timestamp with time zone)
       `, [
         responseData.server_id,
         status,
@@ -781,7 +820,7 @@ class ServerMonitor {
         responseData.response_headers ? JSON.stringify(responseData.response_headers) : null,
         responseData.response_body,
         responseData.source_ip,
-        responseData.checked_at
+        iranTimeString
       ]);
     } catch (error) {
       console.error('❌ Failed to store response:', error);
