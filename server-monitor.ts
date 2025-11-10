@@ -197,7 +197,7 @@ class ServerMonitor {
           id SERIAL PRIMARY KEY,
           server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
           status VARCHAR(20) NOT NULL DEFAULT 'up',
-          response_time DECIMAL(10,2) NOT NULL,
+          response_time NUMERIC(10, 3),
           is_success BOOLEAN NOT NULL,
           status_code INTEGER,
           response_size INTEGER,
@@ -234,6 +234,45 @@ class ServerMonitor {
         ALTER TABLE monitoring_data 
         ADD COLUMN IF NOT EXISTS source_ip INET;
       `);
+
+      // Migrate response_time column from INTEGER/DECIMAL to NUMERIC(10, 3) if needed
+      // This is critical because worker sends decimal values like "118.467"
+      try {
+        const columnType = await this.dbClient.query(`
+          SELECT data_type, numeric_precision, numeric_scale
+          FROM information_schema.columns 
+          WHERE table_schema = 'public' 
+            AND table_name = 'monitoring_data' 
+            AND column_name = 'response_time'
+        `);
+        
+        if (columnType.rows.length > 0) {
+          const currentType = columnType.rows[0].data_type;
+          const currentPrecision = columnType.rows[0].numeric_precision;
+          const currentScale = columnType.rows[0].numeric_scale;
+          
+          // Check if it's INTEGER or DECIMAL with wrong precision/scale
+          if (currentType === 'integer' || 
+              (currentType === 'numeric' && (currentPrecision !== 10 || currentScale !== 3)) ||
+              (currentType === 'numeric' && currentPrecision === null)) {
+            console.log(`Migrating response_time column from ${currentType} to NUMERIC(10, 3)...`);
+            
+            await this.dbClient.query(`
+              ALTER TABLE monitoring_data 
+              ALTER COLUMN response_time TYPE NUMERIC(10, 3)
+              USING CASE 
+                WHEN response_time IS NULL THEN NULL
+                ELSE response_time::NUMERIC(10, 3)
+              END
+            `);
+            
+            console.log('✅ Successfully migrated response_time column to NUMERIC(10, 3)');
+          }
+        }
+      } catch (error) {
+        console.log('Warning: Could not migrate response_time column type:', error instanceof Error ? error.message : 'Unknown error');
+        // Don't throw - this is a migration that might fail if column doesn't exist yet
+      }
 
       // Fix servers table schema issues
       await this.dbClient.query(`
