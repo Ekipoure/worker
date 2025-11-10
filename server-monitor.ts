@@ -9,7 +9,7 @@ import moment from 'moment-timezone';
 
 // Database configuration
 const DB_CONFIG = {
-  connectionString: 'postgresql://neondb_owner:npg_6VrBJeTUgRj4@ep-solitary-meadow-ad8vsnhd-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
+  connectionString: 'postgresql://admin:admin123@5.2.69.16:5432/radar'
 };
 
 // Timezone configuration
