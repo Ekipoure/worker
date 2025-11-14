@@ -1,5 +1,8 @@
 #!/usr/bin/env ts-node
 
+import * as dotenv from 'dotenv';
+dotenv.config();
+
 import { Client } from 'pg';
 import * as http from 'http';
 import * as https from 'https';
@@ -9,8 +12,14 @@ import moment from 'moment-timezone';
 
 // Database configuration
 const DB_CONFIG = {
-  connectionString: 'postgresql://admin:admin123@5.2.69.16:5432/radar'
+  connectionString: process.env.DATABASE_URL || process.env.CONNECTION_STRING || ''
 };
+
+if (!DB_CONFIG.connectionString) {
+  console.error('❌ Error: DATABASE_URL or CONNECTION_STRING environment variable is not set');
+  console.error('Please set it in your .env file');
+  process.exit(1);
+}
 
 // API configuration
 const API_BASE_URL = process.env.API_BASE_URL || 'http://localhost:3000';
