@@ -4,7 +4,7 @@ A comprehensive server monitoring system built with TypeScript and PostgreSQL th
 
 ## Features
 
-- **Multiple Monitoring Types**: HTTP, HTTPS, TCP, and Ping monitoring
+- **Multiple Monitoring Types**: HTTP, HTTPS, TCP, UDP, and Ping monitoring
 - **Real-time Monitoring**: Continuous monitoring with configurable intervals
 - **Database Storage**: PostgreSQL database for storing monitoring data and statistics
 - **Iran Timezone Support**: Built-in support for Iran timezone (Asia/Tehran)
@@ -52,7 +52,7 @@ Servers are stored in the `servers` table with the following structure:
 - `name`: Server display name
 - `ip_address`: Server IP address or domain name
 - `port`: Port number (optional for ping)
-- `request_type`: Type of check ('tcp', 'http', 'https', 'ping')
+- `request_type`: Type of check ('tcp', 'udp', 'http', 'https', 'ping')
 - `endpoint`: Custom endpoint URL (optional)
 - `expected_status_code`: Expected HTTP status code (for HTTP/HTTPS)
 - `server_group`: Server group ('iranian', 'global', etc.)
@@ -93,6 +93,14 @@ npm run build
 - Tests TCP port connectivity
 - Measures connection time
 - Useful for database servers, custom services
+
+### UDP Monitoring
+- Tests UDP port connectivity using nmap
+- Uses `sudo nmap -sU -p <port> --reason --stats-every 1s <ip>` command
+- Measures response time from nmap output
+- Detects port states: open, closed, filtered, open|filtered
+- Useful for DNS servers, game servers, and UDP-based services
+- Note: Requires sudo privileges for nmap UDP scanning
 
 ### Ping Monitoring
 - Uses system ping command

@@ -12,6 +12,9 @@ const DB_CONFIG = {
   connectionString: 'postgresql://admin:admin123@5.2.69.16:5432/radar'
 };
 
+// API configuration
+const API_BASE_URL = process.env.API_BASE_URL || 'http://localhost:3000';
+
 // Timezone configuration
 const IRAN_TIMEZONE = 'Asia/Tehran';
 
@@ -49,7 +52,7 @@ interface Server {
   name: string;
   ip_address: string;
   port?: number; // Made optional
-  request_type: 'tcp' | 'http' | 'https' | 'ping';
+  request_type: 'tcp' | 'udp' | 'http' | 'https' | 'ping';
   endpoint?: string;
   expected_status_code?: number;
   check_interval: number; // in seconds
@@ -72,6 +75,8 @@ interface ResponseData {
   response_body?: string;
   source_ip?: string;
   checked_at: Date;
+  nmap_output?: string; // For UDP: raw nmap output
+  status?: 'up' | 'down' | 'timeout' | 'error' | 'skipped'; // Status for API
 }
 
 class ServerMonitor {
@@ -143,6 +148,96 @@ class ServerMonitor {
     return ipRegex.test(ip);
   }
 
+  // Helper function to send monitoring data to API
+  private async sendMonitoringDataToAPI(responseData: ResponseData): Promise<boolean> {
+    try {
+      const status = responseData.status || this.mapIsSuccessToStatus(responseData.is_success, responseData.error_message);
+      
+      const payload: any = {
+        server_id: responseData.server_id,
+        source_ip: responseData.source_ip || 'unknown',
+        status: status,
+        response_time: responseData.response_time,
+        error_message: responseData.error_message
+      };
+
+      // For UDP, include nmap_output if available
+      if (responseData.nmap_output) {
+        payload.nmap_output = responseData.nmap_output;
+        payload.request_type = 'udp';
+      }
+
+      const url = new URL(`${API_BASE_URL}/api/agents/monitoring/send`);
+      const isHttps = url.protocol === 'https:';
+      const httpModule = isHttps ? https : http;
+
+      return new Promise((resolve) => {
+        const postData = JSON.stringify(payload);
+        const options = {
+          hostname: url.hostname,
+          port: url.port || (isHttps ? 443 : 80),
+          path: url.pathname,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(postData)
+          },
+          timeout: 10000
+        };
+
+        const req = httpModule.request(options, (res) => {
+          let data = '';
+          res.on('data', (chunk) => {
+            data += chunk;
+          });
+          res.on('end', () => {
+            if (res.statusCode === 200 || res.statusCode === 201) {
+              resolve(true);
+            } else {
+              console.error(`❌ API returned status ${res.statusCode}: ${data}`);
+              resolve(false);
+            }
+          });
+        });
+
+        req.on('error', (error) => {
+          console.error(`❌ Error sending data to API: ${error.message}`);
+          resolve(false);
+        });
+
+        req.on('timeout', () => {
+          req.destroy();
+          console.error('❌ API request timeout');
+          resolve(false);
+        });
+
+        req.write(postData);
+        req.end();
+      });
+    } catch (error) {
+      console.error(`❌ Error in sendMonitoringDataToAPI: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  }
+
+  // Map is_success and error_message to status
+  private mapIsSuccessToStatus(isSuccess: boolean, errorMessage?: string): 'up' | 'down' | 'timeout' | 'error' {
+    if (isSuccess) {
+      return 'up';
+    }
+    
+    if (errorMessage) {
+      if (errorMessage.includes('timeout') || errorMessage.includes('Timeout')) {
+        return 'timeout';
+      }
+      if (errorMessage.includes('No response') || errorMessage.includes('no response')) {
+        return 'timeout';
+      }
+    }
+    
+    return 'down';
+  }
+
   // Helper method to ensure timezone is set correctly (can be called periodically)
   // This method is optimized to only set timezone if it's not already set correctly
   private async ensureTimezone(): Promise<void> {
@@ -209,7 +304,7 @@ class ServerMonitor {
           name VARCHAR(255) NOT NULL,
           ip_address INET NOT NULL,
           port INTEGER,
-          request_type VARCHAR(10) NOT NULL CHECK (request_type IN ('tcp', 'http', 'https', 'ping')),
+          request_type VARCHAR(10) NOT NULL CHECK (request_type IN ('tcp', 'udp', 'http', 'https', 'ping')),
           endpoint VARCHAR(500),
           expected_status_code INTEGER DEFAULT 200,
           server_group VARCHAR(100) DEFAULT 'Default',
@@ -486,6 +581,9 @@ class ServerMonitor {
         case 'tcp':
           responseData = await this.checkTcpServer(server, startTime, sourceIP);
           break;
+        case 'udp':
+          responseData = await this.checkUdpServer(server, startTime, sourceIP);
+          break;
         case 'ping':
           responseData = await this.checkPingServer(server, startTime, sourceIP);
           break;
@@ -493,8 +591,13 @@ class ServerMonitor {
           throw new Error(`Unsupported request type: ${server.request_type}`);
       }
 
-      // Store response in database
-      await this.storeResponse(responseData);
+      // Store response via API (preferred) and fallback to database
+      const apiSuccess = await this.sendMonitoringDataToAPI(responseData);
+      if (!apiSuccess) {
+        // Fallback to database if API fails
+        console.warn(`⚠️  API failed for server ${server.id}, falling back to database`);
+        await this.storeResponse(responseData);
+      }
 
       // Log result
       const status = responseData.is_success ? '✅' : '❌';
@@ -515,7 +618,13 @@ class ServerMonitor {
         checked_at: getIranDate()
       };
 
-      await this.storeResponse(responseData);
+      // Store response via API (preferred) and fallback to database
+      const apiSuccess = await this.sendMonitoringDataToAPI(responseData);
+      if (!apiSuccess) {
+        // Fallback to database if API fails
+        console.warn(`⚠️  API failed for server ${server.id}, falling back to database`);
+        await this.storeResponse(responseData);
+      }
       const address = server.port ? `${server.ip_address}:${server.port}` : server.ip_address;
       console.log(`❌ ${server.name} (${address}) - Error: ${responseData.error_message}`);
     } finally {
@@ -680,6 +789,198 @@ class ServerMonitor {
         });
       });
     });
+  }
+
+  private async checkUdpServer(server: Server, startTime: number, sourceIP: string): Promise<ResponseData> {
+    // UDP checks require a port, so if no port is specified, return an error
+    if (!server.port) {
+      const responseTime = Date.now() - startTime;
+      return {
+        server_id: server.id,
+        response_time: responseTime,
+        is_success: false,
+        error_message: 'Port is required for UDP checks',
+        source_ip: sourceIP,
+        checked_at: getIranDate()
+      };
+    }
+
+    // Use nmap for UDP scanning (similar to ping implementation)
+    const { exec } = require('child_process');
+    const util = require('util');
+    const execAsync = util.promisify(exec);
+    
+    try {
+      // Convert timeout from milliseconds to seconds for nmap
+      const timeoutSeconds = Math.ceil(server.timeout / 1000);
+      
+      // Build nmap command: sudo nmap -sU -p <port> --reason --stats-every 1s <ip>
+      // -sU: UDP scan
+      // -p: specific port
+      // --reason: show reason for port state
+      // --stats-every 1s: show stats every second
+      // --max-rtt-timeout: maximum round-trip time timeout
+      const command = `sudo nmap -sU -p ${server.port} --reason --stats-every 1s --max-rtt-timeout ${timeoutSeconds}s ${server.ip_address}`;
+      
+      const { stdout, stderr } = await execAsync(command, {
+        timeout: server.timeout + 2000, // Add 2 seconds buffer for command execution
+        maxBuffer: 1024 * 1024 // 1MB buffer
+      });
+      
+      // Store raw nmap output for API parsing
+      const nmapOutput = stdout;
+      
+      // Parse nmap output to determine port state and response time
+      const fallbackTime = Date.now() - startTime; // Fallback to total execution time
+      let responseTime = fallbackTime;
+      let isSuccess = false;
+      let errorMessage: string | undefined = undefined;
+      let status: 'up' | 'down' | 'timeout' | 'error' = 'error';
+      
+      const lines = stdout.split('\n');
+      
+      // Look for port status line
+      // Format examples:
+      // "53/udp open|filtered domain  udp-response ttl 52 time 0.001s"
+      // "53/udp open          domain  udp-response ttl 52 time 0.001s"
+      // "53/udp closed        domain  port-unreachable ttl 52 time 0.001s"
+      // "53/udp filtered      domain  no-response"
+      const portLine = lines.find((line: string) => {
+        // Match lines that contain the port number followed by /udp
+        const portPattern = new RegExp(`\\b${server.port}/udp\\b`, 'i');
+        return portPattern.test(line) && (line.includes('open') || line.includes('closed') || line.includes('filtered'));
+      });
+      
+      if (portLine) {
+        // Extract port state (open, open|filtered, closed, filtered)
+        // Check for open|filtered first, then individual states
+        let portState = 'unknown';
+        if (portLine.match(/open\|filtered/i)) {
+          portState = 'open|filtered';
+        } else {
+          const stateMatch = portLine.match(/(open|closed|filtered)/i);
+          portState = stateMatch ? stateMatch[1].toLowerCase() : 'unknown';
+        }
+        
+        // Extract response time from nmap output
+        // Format: "time 0.001s" or "time 1.23s"
+        const timeMatch = portLine.match(/time\s+([\d.]+)\s*s/i);
+        if (timeMatch && timeMatch[1]) {
+          const extractedTime = parseFloat(timeMatch[1]) * 1000; // Convert to milliseconds
+          if (!isNaN(extractedTime) && extractedTime > 0 && extractedTime < 100000) {
+            responseTime = extractedTime;
+          }
+        }
+        
+        // Determine success and status based on port state
+        if (portState === 'open' || portState === 'open|filtered') {
+          // Port is open or open|filtered (service responded or no ICMP error)
+          isSuccess = true;
+          status = 'up';
+        } else if (portState === 'closed') {
+          // Port is closed (ICMP port unreachable received)
+          isSuccess = false;
+          status = 'down';
+          errorMessage = 'UDP port is closed (port unreachable)';
+        } else if (portState === 'filtered') {
+          // Port is filtered (no response, no ICMP error)
+          isSuccess = false;
+          status = 'timeout';
+          errorMessage = 'UDP port is filtered (no response)';
+        } else {
+          // Unknown state
+          isSuccess = false;
+          status = 'error';
+          errorMessage = `UDP port state unknown: ${portState}`;
+        }
+        
+        // Extract reason if available
+        const reasonMatch = portLine.match(/reason:\s*([^\s]+)/i) || 
+                           portLine.match(/(udp-response|port-unreachable|no-response)/i);
+        if (reasonMatch) {
+          const reason = reasonMatch[1].toLowerCase();
+          if (reason === 'udp-response') {
+            // Port responded to UDP packet
+            isSuccess = true;
+            status = 'up';
+          } else if (reason === 'port-unreachable') {
+            // Port is closed (ICMP port unreachable)
+            isSuccess = false;
+            status = 'down';
+            errorMessage = 'UDP port is closed (ICMP port unreachable)';
+          } else if (reason === 'no-response') {
+            // Port is filtered (no response)
+            isSuccess = false;
+            status = 'timeout';
+            errorMessage = 'UDP port is filtered (no response)';
+          }
+        }
+      } else {
+        // Could not find port status line - might be host down or scan failed
+        isSuccess = false;
+        status = 'error';
+        errorMessage = 'Could not determine UDP port state from nmap output';
+      }
+      
+      // Check if response time exceeds timeout
+      if (isSuccess && responseTime > server.timeout) {
+        isSuccess = false;
+        status = 'timeout';
+        errorMessage = `UDP response time ${responseTime.toFixed(2)}ms exceeds timeout ${server.timeout}ms`;
+      }
+      
+      return {
+        server_id: server.id,
+        response_time: responseTime,
+        is_success: isSuccess,
+        status: status,
+        error_message: errorMessage,
+        source_ip: sourceIP,
+        checked_at: getIranDate(),
+        nmap_output: nmapOutput // Include raw nmap output for API parsing
+      };
+      
+    } catch (error) {
+      const responseTime = Date.now() - startTime;
+      
+      // Parse error message
+      let errorMessage = 'UDP scan failed';
+      let status: 'up' | 'down' | 'timeout' | 'error' = 'error';
+      if (error instanceof Error) {
+        // Check if it's a timeout error
+        if (error.message.includes('timeout') || error.message.includes('TIMEOUT')) {
+          errorMessage = 'UDP scan timeout - No response received';
+          status = 'timeout';
+        } else if (error.message.includes('ECONNREFUSED') || error.message.includes('port-unreachable')) {
+          errorMessage = 'UDP port is closed';
+          status = 'down';
+        } else {
+          errorMessage = `UDP scan error: ${error.message}`;
+          status = 'error';
+        }
+      }
+      
+      // اگر scan timeout کامل شود (response_time >= timeout)، آفلاین است
+      // در غیر این صورت، اگر خطا سریع برگردد، هنوز ممکن است آنلاین باشد
+      const isSuccess = responseTime < server.timeout;
+      if (isSuccess && status === 'error') {
+        status = 'down';
+      } else if (!isSuccess && status === 'error') {
+        status = 'timeout';
+        errorMessage = 'UDP scan timeout - No response received';
+      }
+      
+      return {
+        server_id: server.id,
+        response_time: responseTime,
+        is_success: isSuccess,
+        status: status,
+        error_message: errorMessage,
+        source_ip: sourceIP,
+        checked_at: getIranDate(),
+        nmap_output: error instanceof Error ? `Error: ${error.message}` : undefined
+      };
+    }
   }
 
   private async checkPingServer(server: Server, startTime: number, sourceIP: string): Promise<ResponseData> {
