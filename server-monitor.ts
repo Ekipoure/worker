@@ -69,6 +69,7 @@ interface Server {
   server_group: 'iranian' | 'global';
   color?: string;
   is_active: boolean;
+  ip_version?: 'ipv4' | 'ipv6'; // IP version: 'ipv4' or 'ipv6', default: 'ipv4'
   created_at: Date;
   updated_at: Date;
 }
@@ -131,14 +132,25 @@ class ServerMonitor {
         }
       }
       
-      // Fallback: try to get local network IP
+      // Fallback: try to get local network IP (prefer IPv4, fallback to IPv6)
       const os = require('os');
       const networkInterfaces = os.networkInterfaces();
       
+      // First, try to find IPv4 address
       for (const interfaceName in networkInterfaces) {
         const interfaces = networkInterfaces[interfaceName];
         for (const iface of interfaces) {
           if (iface.family === 'IPv4' && !iface.internal) {
+            return iface.address;
+          }
+        }
+      }
+      
+      // If no IPv4 found, try IPv6
+      for (const interfaceName in networkInterfaces) {
+        const interfaces = networkInterfaces[interfaceName];
+        for (const iface of interfaces) {
+          if ((iface.family === 'IPv6' || iface.family === 6) && !iface.internal) {
             return iface.address;
           }
         }
@@ -151,10 +163,25 @@ class ServerMonitor {
     }
   }
 
-  // Helper function to validate IP address format
-  private isValidIP(ip: string): boolean {
-    const ipRegex = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
-    return ipRegex.test(ip);
+  // Helper function to validate IP address format (supports both IPv4 and IPv6)
+  private isValidIP(ip: string, version?: 'ipv4' | 'ipv6'): boolean {
+    // If version is specified, validate only that version
+    if (version === 'ipv6' || (!version && this.isIPv6(ip))) {
+      // IPv6 validation: supports full format, compressed format, and localhost
+      const ipv6Regex = /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]+|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))$/;
+      if (ipv6Regex.test(ip)) return true;
+    }
+    if (version === 'ipv4' || !version) {
+      // IPv4 validation
+      const ipv4Regex = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+      return ipv4Regex.test(ip);
+    }
+    return false;
+  }
+
+  // Helper function to detect if an IP address is IPv6
+  private isIPv6(ip: string): boolean {
+    return ip.includes(':');
   }
 
   // Helper function to send monitoring data to API
@@ -321,6 +348,7 @@ class ServerMonitor {
           check_interval INTEGER DEFAULT 60,
           timeout INTEGER DEFAULT 5000,
           is_active BOOLEAN DEFAULT true,
+          ip_version VARCHAR(4) DEFAULT 'ipv4' CHECK (LOWER(ip_version) IN ('ipv4', 'ipv6') OR ip_version IS NULL),
           created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
           updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
@@ -419,6 +447,53 @@ class ServerMonitor {
         ALTER TABLE servers 
         ADD COLUMN IF NOT EXISTS server_group VARCHAR(100) DEFAULT 'Default';
       `);
+
+      // Add ip_version column for IPv4/IPv6 support
+      await this.dbClient.query(`
+        ALTER TABLE servers 
+        ADD COLUMN IF NOT EXISTS ip_version VARCHAR(4) DEFAULT 'ipv4';
+      `);
+      
+      // Normalize existing ip_version values to lowercase
+      await this.dbClient.query(`
+        UPDATE servers 
+        SET ip_version = LOWER(ip_version) 
+        WHERE ip_version IS NOT NULL 
+          AND ip_version != LOWER(ip_version)
+      `);
+      
+      // Drop existing constraint if it exists and recreate with case-insensitive check
+      try {
+        const constraintCheck = await this.dbClient.query(`
+          SELECT constraint_name 
+          FROM information_schema.table_constraints 
+          WHERE table_schema = 'public' 
+            AND table_name = 'servers' 
+            AND constraint_name = 'servers_ip_version_check'
+        `);
+        
+        if (constraintCheck.rows.length > 0) {
+          // Drop existing constraint
+          await this.dbClient.query(`
+            ALTER TABLE servers 
+            DROP CONSTRAINT IF EXISTS servers_ip_version_check
+          `);
+        }
+      } catch (error) {
+        // Ignore error if constraint doesn't exist
+      }
+      
+      // Add case-insensitive check constraint
+      try {
+        await this.dbClient.query(`
+          ALTER TABLE servers 
+          ADD CONSTRAINT servers_ip_version_check 
+          CHECK (LOWER(ip_version) IN ('ipv4', 'ipv6') OR ip_version IS NULL)
+        `);
+      } catch (error) {
+        // Constraint might already exist, ignore error
+        console.log('Note: ip_version constraint check skipped (may already exist)');
+      }
 
       // Make port nullable for ping requests
       await this.dbClient.query(`
@@ -650,7 +725,10 @@ class ServerMonitor {
       } else {
         // Build URL with port if available, otherwise use default ports
         const port = server.port || (server.request_type === 'https' ? 443 : 80);
-        url = `${server.request_type}://${server.ip_address}:${port}`;
+        const ipVersion = server.ip_version || 'ipv4';
+        // IPv6 addresses must be enclosed in brackets in URLs
+        const formattedIP = ipVersion === 'ipv6' ? `[${server.ip_address}]` : server.ip_address;
+        url = `${server.request_type}://${formattedIP}:${port}`;
       }
       const isHttps = server.request_type === 'https';
       const client = isHttps ? https : http;
@@ -823,13 +901,16 @@ class ServerMonitor {
       // Convert timeout from milliseconds to seconds for nmap
       const timeoutSeconds = Math.ceil(server.timeout / 1000);
       
-      // Build nmap command: sudo nmap -sU -p <port> --reason --stats-every 1s <ip>
+      // Build nmap command: sudo nmap [-6] -sU -p <port> --reason --stats-every 1s <ip>
+      // -6: IPv6 scan (if ip_version is 'ipv6')
       // -sU: UDP scan
       // -p: specific port
       // --reason: show reason for port state
       // --stats-every 1s: show stats every second
       // --max-rtt-timeout: maximum round-trip time timeout
-      const command = `sudo nmap -sU -p ${server.port} --reason --stats-every 1s --max-rtt-timeout ${timeoutSeconds}s ${server.ip_address}`;
+      const ipVersion = server.ip_version || 'ipv4';
+      const ipv6Flag = ipVersion === 'ipv6' ? '-6' : '';
+      const command = `sudo nmap ${ipv6Flag} -sU -p ${server.port} --reason --stats-every 1s --max-rtt-timeout ${timeoutSeconds}s ${server.ip_address}`.trim();
       
       const { stdout, stderr } = await execAsync(command, {
         timeout: server.timeout + 2000, // Add 2 seconds buffer for command execution
@@ -1000,8 +1081,11 @@ class ServerMonitor {
     
     try {
       // Use ping command with timeout
+      // For IPv6, use ping6 command; for IPv4, use ping command
       const timeout = Math.ceil(server.timeout / 1000); // Convert to seconds
-      const command = `ping -c 1 -W ${timeout} ${server.ip_address}`;
+      const ipVersion = server.ip_version || 'ipv4';
+      const pingCommand = ipVersion === 'ipv6' ? 'ping6' : 'ping';
+      const command = `${pingCommand} -c 1 -W ${timeout} ${server.ip_address}`;
       
       const { stdout, stderr } = await execAsync(command);
       
