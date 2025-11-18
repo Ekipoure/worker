@@ -101,64 +101,24 @@ class ServerMonitor {
     this.dbClient = new Client(DB_CONFIG);
   }
 
-  // Function to get the source IP address of the current VPS
+  // Function to get the IPv4 source IP address of the current VPS
   private async getSourceIP(): Promise<string> {
+    const { exec } = require('child_process');
+    const util = require('util');
+    const execAsync = util.promisify(exec);
+
     try {
-      // Try to get external IP using a public service
-      const { exec } = require('child_process');
-      const util = require('util');
-      const execAsync = util.promisify(exec);
-      
-      // Use multiple methods to get the external IP
-      const commands = [
-        'curl -s ifconfig.me',
-        'curl -s ipinfo.io/ip',
-        'curl -s icanhazip.com',
-        'curl -s ipecho.net/plain',
-        'wget -qO- ifconfig.me'
-      ];
-      
-      for (const command of commands) {
-        try {
-          const { stdout } = await execAsync(command);
-          const ip = stdout.trim();
-          // Validate IP address format
-          if (this.isValidIP(ip)) {
-            return ip;
-          }
-        } catch (error) {
-          // Continue to next command if this one fails
-          continue;
-        }
+      const { stdout } = await execAsync('curl -s https://ipv4.icanhazip.com');
+      const ip = stdout.trim();
+
+      if (this.isValidIP(ip, 'ipv4')) {
+        return ip;
       }
-      
-      // Fallback: try to get local network IP (prefer IPv4, fallback to IPv6)
-      const os = require('os');
-      const networkInterfaces = os.networkInterfaces();
-      
-      // First, try to find IPv4 address
-      for (const interfaceName in networkInterfaces) {
-        const interfaces = networkInterfaces[interfaceName];
-        for (const iface of interfaces) {
-          if (iface.family === 'IPv4' && !iface.internal) {
-            return iface.address;
-          }
-        }
-      }
-      
-      // If no IPv4 found, try IPv6
-      for (const interfaceName in networkInterfaces) {
-        const interfaces = networkInterfaces[interfaceName];
-        for (const iface of interfaces) {
-          if ((iface.family === 'IPv6' || iface.family === 6) && !iface.internal) {
-            return iface.address;
-          }
-        }
-      }
-      
+
+      console.warn(`⚠️  Received invalid IPv4 from ipv4.icanhazip.com: ${ip}`);
       return 'unknown';
     } catch (error) {
-      console.warn('⚠️  Could not determine source IP:', error);
+      console.warn('⚠️  Could not determine IPv4 source IP:', error);
       return 'unknown';
     }
   }
