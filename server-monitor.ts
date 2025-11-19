@@ -635,12 +635,13 @@ class ServerMonitor {
           throw new Error(`Unsupported request type: ${server.request_type}`);
       }
 
-      // Store response via API (preferred) and fallback to database
+      // Always store response in local database to ensure persistence
+      await this.storeResponse(responseData);
+
+      // Send response to API (still preferred for centralized reporting)
       const apiSuccess = await this.sendMonitoringDataToAPI(responseData);
       if (!apiSuccess) {
-        // Fallback to database if API fails
-        console.warn(`⚠️  API failed for server ${server.id}, falling back to database`);
-        await this.storeResponse(responseData);
+        console.warn(`⚠️  API failed for server ${server.id}. Data stored locally in database.`);
       }
 
       // Log result
@@ -662,12 +663,13 @@ class ServerMonitor {
         checked_at: getIranDate()
       };
 
-      // Store response via API (preferred) and fallback to database
+      // Always store response in local database to ensure persistence
+      await this.storeResponse(responseData);
+
+      // Send response to API (still preferred for centralized reporting)
       const apiSuccess = await this.sendMonitoringDataToAPI(responseData);
       if (!apiSuccess) {
-        // Fallback to database if API fails
-        console.warn(`⚠️  API failed for server ${server.id}, falling back to database`);
-        await this.storeResponse(responseData);
+        console.warn(`⚠️  API failed for server ${server.id}. Data stored locally in database.`);
       }
       const address = server.port ? `${server.ip_address}:${server.port}` : server.ip_address;
       console.log(`❌ ${server.name} (${address}) - Error: ${responseData.error_message}`);
