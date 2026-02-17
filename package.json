@@ -12,7 +12,6 @@
     "install-deps": "npm install"
   },
   "dependencies": {
-    "@types/moment-timezone": "^0.5.13",
     "@types/pg": "^8.10.9",
     "dotenv": "^16.6.1",
     "moment-timezone": "^0.6.0",
